@@ -3,11 +3,11 @@ mod schema;
 use anyhow::Result;
 use axum::{Router, extract::State, http::HeaderMap, routing::get};
 use clap::Parser;
-use db::{
-    Pool, RoPool, RwPool,
-    diesel::{QueryableByName, RunQueryDsl, sql_types::Text},
+use db::{Pool, RoPool, RwPool, diesel_async::RunQueryDsl};
+use diesel::{
+    QueryableByName,
+    sql_types::{Integer, Text},
 };
-use diesel::sql_types::Integer;
 use std::{net::SocketAddr, ops::DerefMut};
 use tokio::net::TcpListener;
 use tracing::{debug, trace};
@@ -70,7 +70,8 @@ async fn root(
 ) -> String {
     let rows: Vec<Row> =
         db::diesel::sql_query("select id, user_agent from requests;")
-            .load(ro_pool.get().unwrap().deref_mut())
+            .load(ro_pool.get().await.unwrap().deref_mut())
+            .await
             .unwrap();
 
     let mut buf = String::new();
@@ -97,7 +98,8 @@ async fn record(
 
     db::diesel::sql_query("insert into requests (user_agent) values ($1);")
         .bind::<Text, _>(format!("{user_agent:?}"))
-        .execute(rw_pool.get().unwrap().deref_mut())
+        .execute(rw_pool.get().await.unwrap().deref_mut())
+        .await
         .unwrap();
 
     "OK"
@@ -131,8 +133,12 @@ mod tests {
             [(USER_AGENT, "THIS IS A TEST".parse().unwrap())]
                 .into_iter()
                 .collect(),
-            State(state),
+            State(state.clone()),
         )
         .await;
+
+        let res = root(State(state)).await;
+
+        assert_eq!(res, "");
     }
 }

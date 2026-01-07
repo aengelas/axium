@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = { version = "1.0.100", default-features = false, features = ["backtrace", "std"] }
+anyhow = { version = "1.0.100", default-features = false, features = [
+  "backtrace",
+  "std",
+] }
 axum = { version = "0.8.8", default-features = false, features = [
   "json",
   "tokio",

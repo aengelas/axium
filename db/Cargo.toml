@@ -5,5 +5,14 @@ edition = "2024"
 
 [dependencies]
 buildstructor = { version = "0.6.0", default-features = false }
+deadpool = { version = "0.12.3", default-features = false, features = ["managed"] }
+deadpool-postgres = { version = "0.14.1", default-features = false, features = [
+  "rt_tokio_1",
+] }
 diesel.workspace = true
-r2d2 = { version = "0.8.10", default-features = false }
+diesel-async = { version = "0.7.4", features = [
+  "deadpool",
+  "pool",
+  "postgres",
+  "tokio",
+], default-features = false }
