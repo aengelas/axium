@@ -1,0 +1,11 @@
+[workspace]
+members = ["db", "web"]
+resolver = "3"
+
+[workspace.dependencies]
+db = { path = "db" }
+diesel = { version = "2.3.5", default-features = false, features = [
+  "postgres",
+  "r2d2",
+] }
+web = { path = "web" }
