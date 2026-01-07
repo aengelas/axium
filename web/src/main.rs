@@ -3,12 +3,17 @@ mod schema;
 use anyhow::Result;
 use axum::{Router, extract::State, http::HeaderMap, routing::get};
 use clap::Parser;
-use db::{Pool, RoPool, RwPool, diesel_async::RunQueryDsl};
+use db::{
+    Pool, ReadOnly, ReadWrite, ReadableConnection, WriteableConnection,
+    diesel_async::{
+        AsyncConnection, RunQueryDsl, scoped_futures::ScopedFutureExt,
+    },
+};
 use diesel::{
     QueryableByName,
     sql_types::{Integer, Text},
 };
-use std::{net::SocketAddr, ops::DerefMut};
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::{debug, trace};
 
@@ -24,8 +29,8 @@ struct Cli {
 
 #[derive(Clone)]
 struct AppState {
-    ro_pool: RoPool,
-    rw_pool: RwPool,
+    ro_pool: Pool<ReadOnly>,
+    rw_pool: Pool<ReadWrite>,
 }
 
 #[tokio::main]
@@ -38,10 +43,20 @@ async fn main() -> Result<()> {
         rw_pool: Pool::rw_builder()
             .database_url(&cli.database_url)
             .test_mode(cfg!(test))
+            .and_max_size(if cfg!(test) {
+                Some(1)
+            } else {
+                None
+            })
             .build()?,
         ro_pool: Pool::ro_builder()
             .database_url(&cli.database_url)
             .test_mode(cfg!(test))
+            .and_max_size(if cfg!(test) {
+                Some(1)
+            } else {
+                None
+            })
             .build()?,
     };
 
@@ -68,11 +83,7 @@ async fn root(
         ..
     }): State<AppState>,
 ) -> String {
-    let rows: Vec<Row> =
-        db::diesel::sql_query("select id, user_agent from requests;")
-            .load(ro_pool.get().await.unwrap().deref_mut())
-            .await
-            .unwrap();
+    let rows = select(&mut ro_pool.get().await.unwrap()).await;
 
     let mut buf = String::new();
     for row in rows {
@@ -80,6 +91,12 @@ async fn root(
     }
 
     buf
+}
+async fn select(conn: &mut impl ReadableConnection) -> Vec<Row> {
+    db::diesel::sql_query("select id, user_agent from requests;")
+        .load(conn)
+        .await
+        .unwrap()
 }
 
 #[axum::debug_handler]
@@ -95,14 +112,30 @@ async fn record(
     let user_agent = headers
         .get("user-agent")
         .expect("missing user-agent header");
+    let user_agent = format!("{user_agent:?}");
 
-    db::diesel::sql_query("insert into requests (user_agent) values ($1);")
-        .bind::<Text, _>(format!("{user_agent:?}"))
-        .execute(rw_pool.get().await.unwrap().deref_mut())
-        .await
-        .unwrap();
+    let mut conn = rw_pool.get().await.unwrap();
+    insert(&mut conn, user_agent).await.unwrap();
 
     "OK"
+}
+
+async fn insert<T: WriteableConnection>(
+    conn: &mut T,
+    user_agent: String,
+) -> std::result::Result<usize, diesel::result::Error> {
+    conn.transaction(|conn| {
+        async move {
+            db::diesel::sql_query(
+                "insert into requests (user_agent) values ($1);",
+            )
+            .bind::<Text, _>(user_agent)
+            .execute(conn)
+            .await
+        }
+        .scope_boxed()
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -117,14 +150,14 @@ mod tests {
         let state = AppState {
             rw_pool: Pool::rw_builder()
                 .database_url(env::var("DATABASE_URL").unwrap())
-                // This is silly in a test, but you can include it in app code
-                // as well.
-                .test_mode(cfg!(test))
+                .test_mode(true)
+                .max_size(1)
                 .build()
                 .unwrap(),
             ro_pool: Pool::ro_builder()
                 .database_url(env::var("DATABASE_URL").unwrap())
-                .test_mode(cfg!(test))
+                .test_mode(true)
+                .max_size(1)
                 .build()
                 .unwrap(),
         };
@@ -137,8 +170,27 @@ mod tests {
         )
         .await;
 
-        let res = root(State(state)).await;
-
+        let res = root(State(state.clone())).await;
         assert_eq!(res, "");
+    }
+
+    #[tokio::test]
+    async fn test_transactions_wo_axum() {
+        let pool = Pool::rw_builder()
+            .database_url(env::var("DATABASE_URL").unwrap())
+            .test_mode(true)
+            .max_size(1)
+            .build()
+            .unwrap();
+
+        let mut conn = pool.get().await.unwrap();
+        db::diesel::sql_query("insert into requests (user_agent) values ($1);")
+            .bind::<Text, _>("TX_TEST".to_string())
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let res = select(&mut conn).await;
+
+        assert_eq!(res.len(), 1);
     }
 }
