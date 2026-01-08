@@ -1,7 +1,17 @@
 mod schema;
 
 use anyhow::Result;
-use axum::{Router, extract::State, http::HeaderMap, routing::get};
+use async_graphql::{
+    EmptyMutation, EmptySubscription, Object, Schema, http::GraphiQLSource,
+};
+use async_graphql_axum::GraphQL;
+use axum::{
+    Router,
+    extract::State,
+    http::HeaderMap,
+    response::{Html, IntoResponse},
+    routing::get,
+};
 use clap::Parser;
 use db::{
     Pool, ReadOnly, ReadWrite, ReadableConnection, WriteableConnection,
@@ -33,11 +43,24 @@ struct AppState {
     rw_pool: Pool<ReadWrite>,
 }
 
+#[derive(Debug)]
+struct Query;
+
+#[Object]
+impl Query {
+    async fn hello(&self) -> &'static str {
+        "hi there"
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     jacklog::from_level!(cli.verbose + 2)?;
     debug!(?cli);
+
+    let schema =
+        Schema::build(Query, EmptyMutation, EmptySubscription).finish();
 
     let state = AppState {
         rw_pool: Pool::rw_builder()
@@ -62,11 +85,18 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/", get(root).post(record))
+        // Mount the graphql schema at /graphql.
+        .route("/graphql", get(graphiql).post_service(GraphQL::new(schema)))
         .with_state(state);
 
     axum::serve(TcpListener::bind(cli.listen).await?, app).await?;
 
     Ok(())
+}
+
+/// Expose the graphiql interactive schema inspector.
+async fn graphiql() -> impl IntoResponse {
+    Html(GraphiQLSource::build().endpoint("graphql").finish())
 }
 
 #[derive(Debug, QueryableByName, PartialEq)]
